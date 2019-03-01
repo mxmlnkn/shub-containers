@@ -1,0 +1,37 @@
+BootStrap: docker
+From: debian:9-slim
+
+%setup
+    echo 'Hello World!' > default-message.txt
+
+%files
+    default-message.txt /etc/default-message.txt
+
+%environment
+    export DEFAULT_MESSAGE=$( cat /etc/default-message.txt )
+
+%post
+    apt-get update && apt-get -y install figlet
+
+%runscript
+    if test $# -eq 0; then
+        figlet "$DEFAULT_MESSAGE"
+    else
+        figlet "$@"
+    fi
+
+%test
+    if command -v figlet &>/dev/null; then
+        echo 'Everything is ok.'
+        exit 0
+    else
+        echo 'Figlet command is missing!'
+        exit 1
+    fi
+
+%labels
+    Author mk@tu-dresden.de
+    Version v0.0.1
+
+%help
+    Microservice for running figlet, a tool for creating ASCII text banners
