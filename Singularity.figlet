@@ -8,7 +8,7 @@ From: debian:9-slim
     default-message.txt /etc/default-message.txt
 
 %environment
-    export DEFAULT_MESSAGE=$( cat /etc/default-message.txt )
+    export DEFAULT_MESSAGE="$( cat /etc/default-message.txt )"
 
 %post
     apt-get update && apt-get -y install figlet
@@ -21,7 +21,7 @@ From: debian:9-slim
     fi
 
 %test
-    if command -v figlet &>/dev/null; then
+    if command -v figlet 1>/dev/null 2>&1; then
         echo 'Everything is ok.'
         exit 0
     else
@@ -34,4 +34,4 @@ From: debian:9-slim
     Version v0.0.1
 
 %help
-    Microservice for running figlet, a tool for creating ASCII text banners
+Microservice for running figlet, a tool for creating ASCII text banners
