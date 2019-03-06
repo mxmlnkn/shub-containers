@@ -1,0 +1,317 @@
+Bootstrap: docker
+From: debian:buster-slim
+
+%environment
+    # elevating this to /bin/bash is not possible. Therefore should on ubuntu also be runnable in /bin/dash -.-
+
+    PREFIX='/opt/lbann'
+
+    exportPath()
+    {
+        if test -d "$2"; then
+            export "$1"="$2"
+            printf "\e[37mExported existing path '$2' into environment variable '$1'\e[0m\n"
+        else
+            printf "\e[31m[Warning] '$2' is not a directory. Won't export it\e[0m\n"
+        fi
+    }
+
+    findPath()
+    {
+        # $1 : fileName, $2 : searchPath
+        if test "$( find "$2" -xtype f -name "$1" | head -2 | wc -l )" -gt 1; then
+            printf "[Warning] Found more than one matching sub path in the searchPath '$2'.\nMatches:\n" 1>&2
+            find "$2" -xtype f -name "$1" 1>&2
+        fi
+        findPath_matchingPath=$( find "$2" -xtype f -name "$1" | head -1 )
+        printf '%s' "${findPath_matchingPath%$1}"
+    }
+
+    exportPath CEREAL_DIR "$PREFIX/cereal"
+    exportPath CNPY_DIR "$PREFIX/cnpy"
+    exportPath CUB_DIR "$PREFIX"/cub-*/
+    exportPath HYDROGEN_DIR "$PREFIX/Elemental"
+
+    exportPath LBANN_DIR "$PREFIX/lbann"
+    if test -d "$LBANN_DIR"; then
+        export PATH="$LBANN_DIR/bin:$PATH"
+        export CMAKE_PREFIX_PATH="$LBANN_DIR:$CMAKE_PREFIX_PATH"
+        export LIBRARY_PATH="$LBANN_DIR/lib:$LIBRARY_PATH"
+        export LD_LIBRARY_PATH="$LBANN_DIR/lib:$LD_LIBRARY_PATH"
+    fi
+
+    export CMAKE_PREFIX_PATH="$OPENCV_DIR:$HYDROGEN_DIR:$CMAKE_PREFIX_PATH"
+
+    setupCUDA()
+    {
+        export PATH="$( findPath 'nvcc' '/usr/local/' ):$PATH"
+
+        CUDA_LIB=$( findPath 'libcudart.so' '/usr/local/' ) &&
+        export LD_LIBRARY_PATH="$CUDA_LIB:$LD_LIBRARY_PATH" &&
+        export LIBRARY_PATH="$CUDA_LIB:$LIBRARY_PATH"
+
+        CUDA_STUBS=$( findPath 'libcuda.so' '/usr/local/' ) &&
+        export LD_LIBRARY_PATH="$CUDA_STUBS:$LD_LIBRARY_PATH" &&
+        export LIBRARY_PATH="$CUDA_STUBS:$LIBRARY_PATH"
+    }
+
+    setupCUDA
+
+%post
+    unzip(){ python -c "from zipfile import PyZipFile; PyZipFile( '''$1''' ).extractall()"; }
+
+    remoteExtract()
+    {
+        remoteExtract_ext="$( printf '%s' "$1" | sed 's/\?.*//; s/.*\.//; s|.*|\L&|;' )"
+        remoteExtract_iTry=5
+        remoteExtract_wgetCmd='wget -q -O- --retry-connrefused --timeout=5 --tries=5 --waitretry=5 --read-timeout=20'
+
+        while test "$remoteExtract_iTry" -gt 0; do
+            remoteExtract_iTry=$(( remoteExtract_iTry - 1 ))
+
+            case "$remoteExtract_ext" in
+                tgz|gz) compression=--gzip ;;
+                xz) compression=--xz ;;
+                tbz2|bz2) compression=--bzip2 ;;
+            esac
+
+            if test "$remoteExtract_ext" = "zip"; then
+                remoteExtract_tmpFile="$( mktemp )" &&
+                $remoteExtract_wgetCmd "$1" > "$remoteExtract_tmpFile" &&
+                unzip "$remoteExtract_tmpFile" &&
+                rm "$remoteExtract_tmpFile"
+            else
+                $remoteExtract_wgetCmd "$1" | tar -x $compression
+            fi &&
+            break
+        done
+    }
+
+    findPath()
+    {
+        # $1 : fileName, $2 : searchPath
+        findPath_nMatches="$( find "$2" -xtype f -name "$1" | head -2 | wc -l )"
+        if test "$findPath_nMatches" -eq 0; then
+            echo "[Warning] Found no matching sub path for '$1' in the searchPath '$2'.\n" 1>&2
+        elif test "$findPath_nMatches" -gt 1; then
+            echo "[Warning] Found more than one matching sub path in the searchPath '$2'.\nMatches:\n" 1>&2
+            find "$2" -xtype f -name "$1" 1>&2
+        fi
+        findPath_matchingPath=$( find "$2" -xtype f -name "$1" | head -1 )
+        printf '%s' "${findPath_matchingPath%$1}"
+    }
+
+    setupCUDA()
+    {
+        # Don't have a NCCL direct link without registration :( so I can't automate it
+        # dpkg -i /opt/nccl-repo-*.deb &&
+        # rm -f "$_" &&
+        # apt-key add /var/nccl-repo-*/*.pub &&
+        # apt-get -y update &&
+        # apt-get -y install --no-install-recommends libnccl-dev &&
+        # dpkg --purge "$( dpkg --get-selections | sed -n -E 's|^(nccl-repo-[^ \t]*).*|\1|p' )"
+
+        cd /opt
+        # Not using cleaner dpkg method because it would install xorg dependencies and others just for the runtime
+        wget -q 'http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1710/x86_64/cuda-repo-ubuntu1710_9.2.148-1_amd64.deb'
+        dpkg -i /opt/cuda-repo-*.deb &&
+        rm -f /opt/cuda-repo-*.deb
+        apt-key adv --fetch-keys 'https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1710/x86_64/7fa2af80.pub'
+
+        apt-get -y update &&
+        apt-get -y install --no-install-recommends cuda-compiler-* cuda-command-line-tools-* cuda-libraries-* cuda-nvml-*
+        dpkg --purge "$( dpkg --get-selections | sed -n -E 's|^(cuda-repo-[^ \t]*).*|\1|p' )"
+
+        export PATH="$( findPath 'nvcc' '/usr/local/' ):$PATH"
+
+        CUDA_LIB=$( findPath 'libcudart.so' '/usr/local/' ) &&
+        export LD_LIBRARY_PATH="$CUDA_LIB:$LD_LIBRARY_PATH" &&
+        export LIBRARY_PATH="$CUDA_LIB:$LIBRARY_PATH"
+
+        # stubs are well stubs, i.e., minimal libraries providing the interface for compilation but
+        # won't work for actually running the programs. For that it is necessary to have the
+        # much larger real libcuda.so installed. For singularity this gets done with the --nv flag which uses
+        # the outer CUDA installation
+        CUDA_STUBS=$( findPath 'libcuda.so' '/usr/local/' ) &&
+        export LD_LIBRARY_PATH="$CUDA_STUBS:$LD_LIBRARY_PATH" &&
+        export LIBRARY_PATH="$CUDA_STUBS:$LIBRARY_PATH"
+        # not sure why this isn't done automatically ... or why Aluminum and LBANN require .so.1 instead of .so
+        # in the first place but this fixes the compilation error
+        ln -s "$CUDA_STUBS/libcuda.so" "$CUDA_STUBS/libcuda.so.1"
+
+        # should extract to folder 'cuda'
+        remoteExtract 'http://developer.download.nvidia.com/compute/redist/cudnn/v7.4.2/cudnn-9.2-linux-x64-v7.4.2.24.tgz'
+        find cuda/ -xtype f -name 'cudnn.h' -execdir mv {} "$CUDA_LIB/../include" \;
+        # if we move the target of the link, then the broken links won't match -xtype f anymore!
+        #  => Need to cache the results before moving anything
+        find cuda/ -xtype f -name 'libcudnn*' -print0 | xargs -0 bash -c 'mv "$@" '"'$CUDA_LIB'" bash
+        rm -rf cuda
+    }
+
+    setupCub()
+    {
+        cd -- "$PREFIX" &&
+        if ! test -d cub-*; then
+            remoteExtract 'https://github.com/NVlabs/cub/archive/v1.8.0.tar.gz'
+        fi &&
+        cd -- cub-* && export CUB_DIR="$( pwd )"
+    }
+
+    setupCereal()
+    {
+        export CEREAL_DIR="$PREFIX"/cereal &&
+        if ! test -d "$CEREAL_DIR"; then
+            cd -- "$PREFIX/src" &&
+            remoteExtract 'https://github.com/USCiLab/cereal/archive/v1.2.2.tar.gz' &&
+            cd cereal-* && mkdir -p build && cd build &&
+            cmake -Wno-dev -DCMAKE_INSTALL_PREFIX="$PREFIX"/cereal -DJUST_INSTALL_CEREAL=ON .. &&
+            make -j "$( nproc )" install
+        fi
+    }
+
+    setupCnpy()
+    {
+        export CNPY_DIR="$PREFIX"/cnpy &&
+        if ! test -d "$CNPY_DIR"; then
+            cd -- "$PREFIX/src" && remoteExtract 'https://github.com/rogersce/cnpy/archive/4e8810b1a8637695171ed346ce68f6984e585ef4.zip' &&
+            cd -- cnpy-* && mkdir -p build && cd build &&
+            cmake -Wno-dev -DCMAKE_INSTALL_PREFIX="$CNPY_DIR" .. && make -j "$( nproc )" install
+        fi
+    }
+
+    fixCMakeCudaMPIPthreadBug()
+    {
+        # fixes https://gitlab.kitware.com/cmake/cmake/issues/17929#note_514823
+        find . -type f | xargs -I{} bash -c '
+            if grep -q -E "(nvcc|CUDA_FLAG).* -pthread" "$0"; then
+                sed -i -r "/nvcc.* -pthread/{s: -pthread( |$): :g}" "$0";
+            fi' {}
+    }
+
+    buildHydrogen()
+    {
+        fixWeirdCUDALinkageBug()
+        {
+            find . -type f | xargs -I{} bash -c '
+                if grep -q -E "^[^ ]*/[cg]\+\+ .*libAl.so" "$0"; then
+                    sed -i -r '\''/^[^ ]*[cg]\+\+ .*libAl.so/{ /-lcuda( |$)/!s:$: -lcuda:g}'\'' "$0";
+                fi' {}
+        }
+
+        # Needs at least CUDA 7.5 because it uses cuda_fp16.h even though Hydrogen_ENABLE_HALF=OFF Oo
+        # Need a commit higher than release 1.1.0 or else the version check when bulding LBANN will fail
+        cd -- "$PREFIX/src" &&
+        remoteExtract 'https://github.com/LLNL/Elemental/archive/6d4bc32515087ed7c8c1dd2687dd2cc771c139d3.zip' &&
+        cd Elemental-* && mkdir -p build && cd build &&
+        cmake -Wno-dev                               \
+              -DCMAKE_BUILD_TYPE=Release             \
+              -DCMAKE_INSTALL_PREFIX="$HYDROGEN_DIR" \
+              -DCMAKE_LIBRARY_PATH="$LIBRARY_PATH"   \
+              -DHydrogen_USE_64BIT_INTS=ON           \
+              -DHydrogen_ENABLE_OPENMP=ON            \
+              -DBUILD_SHARED_LIBS=ON                 \
+              -DHydrogen_ENABLE_ALUMINUM=OFF         \
+              -DHydrogen_ENABLE_CUDA=ON              \
+              -DHydrogen_AVOID_CUDA_AWARE_MPI=ON     \
+              .. &&
+        fixCMakeCudaMPIPthreadBug && fixWeirdCUDALinkageBug && make -j "$( nproc )" VERBOSE=1 install
+    }
+
+    buildOpenCV()
+    {
+        cd -- "$PREFIX/src" && remoteExtract 'https://github.com/opencv/opencv/archive/3.4.3.tar.gz' &&
+        cd opencv-* && mkdir -p build && cd build &&
+        cmake -Wno-dev                                      \
+              -DCMAKE_BUILD_TYPE=Release                    \
+              -DCMAKE_INSTALL_PREFIX="$OPENCV_DIR"          \
+              -DWITH_JPEG=ON                                \
+              -DWITH_PNG=ON                                 \
+              -DWITH_TIFF=ON                                \
+              -DWITH_CUDA=OFF                               \
+              -DWITH_JASPER=OFF                             \
+              -DBUILD_SHARED_LIBS=ON                        \
+              -DBUILD_JAVA=OFF                              \
+              -DBUILD_opencv_calib3d=OFF                    \
+              -DBUILD_opencv_cuda=OFF                       \
+              -DBUILD_opencv_dnn=OFF                        \
+              -DBUILD_opencv_features2d=OFF                 \
+              -DBUILD_opencv_flann=OFF                      \
+              -DBUILD_opencv_java=OFF                       \
+              -DBUILD_opencv_java_bindings_generator=OFF    \
+              -DBUILD_opencv_python_bindings_generator=OFF  \
+              -DBUILD_opencv_ml=OFF                         \
+              -DBUILD_opencv_python2=OFF                    \
+              -DBUILD_opencv_python3=OFF                    \
+              -DBUILD_opencv_stitching=OFF                  \
+              -DBUILD_opencv_ts=OFF                         \
+              -DBUILD_opencv_superres=OFF                   \
+              -DBUILD_opencv_videoio=OFF                    \
+              -DBUILD_opencv_videostab=OFF                  \
+              .. &&
+        make -j "$( nproc )" install
+    }
+
+    buildLBANN()
+    {
+        fixLibZBug()
+        {
+            find . -type f -execdir  bash -c '
+                if grep "g++.*libcnpy\.so" "$0" | grep -q -v " -lz"; then
+                    sed -i -r "/g\+\+ .*libcnpy\.so( |$)/{ s:(libcnpy\.so |$):\1-lz : }" "$0";
+                fi' {} \;
+        }
+
+        # 0.98.1 does not work for me because it hangs: https://github.com/LLNL/lbann/issues/914
+        cd -- "$PREFIX/src" && remoteExtract 'https://github.com/LLNL/lbann/archive/10b84da933a7b62e63120c6f9067df17cd9ba5f3.zip' &&
+        cd lbann-* && mkdir -p build && cd build &&
+        cmake -Wno-dev                               \
+              -DCMAKE_BUILD_TYPE=Release             \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX"/lbann \
+              -DCMAKE_LIBRARY_PATH="$LIBRARY_PATH"   \
+              -DHydrogen_DIR="$HYDROGEN_DIR"         \
+              -DLBANN_WITH_ALUMINUM:BOOL=OFF         \
+              -DLBANN_WITH_CUDA=ON                   \
+              -DLBANN_USE_PROTOBUF_MODULE=$( if test -f "$PROTOBUF_ROOT/lib/cmake/protobuf/protobuf-config.cmake"; then echo OFF; else echo ON; fi )  .. &&
+        fixCMakeCudaMPIPthreadBug && fixLibZBug && make -j 2 VERBOSE=1 install
+        # only building with -j 2 instead of -j 4 because some VMs don't seem to have enough memory to run for compilations in parallel ...
+    }
+
+    apt-get -y update &&
+    apt-get -y install --no-install-recommends \
+        findutils sed grep coreutils ca-certificates gnupg2 tar wget cmake gcc g++ gfortran python make \
+        zlib1g-dev libopenblas-dev libopenmpi-dev libprotobuf-dev protobuf-compiler liblapack-dev \
+        zlib1g libopenblas-base libopenmpi3 libprotobuf17 liblapack3 libgfortran5 libstdc++6 libc6
+
+    PREFIX='/opt/lbann'
+
+    mkdir -p -- "$PREFIX/src"
+
+    setupCUDA
+    setupCub
+    setupCereal
+    setupCnpy
+
+    HYDROGEN_DIR="$PREFIX/Elemental" &&
+    buildHydrogen &&
+    export CMAKE_PREFIX_PATH="$HYDROGEN_DIR:$CMAKE_PREFIX_PATH"
+
+    OPENCV_DIR="$PREFIX/opencv" &&
+    buildOpenCV &&
+    export CMAKE_PREFIX_PATH="$OPENCV_DIR:$CMAKE_PREFIX_PATH"
+
+    buildLBANN
+
+    # Clean up for smaller image size
+
+    apt-get -y purge \
+        wget cmake g++ python make \
+        zlib1g-dev libopenblas-dev libopenmpi-dev libprotobuf-dev protobuf-compiler liblapack-dev
+    apt-get -y autoremove
+    apt-get -y clean
+    rm -rf /var/lib/apt/lists/*
+    rm -rf "$PREFIX/src"
+
+%runscript
+    PREFIX='/opt/lbann'
+
+    "$PREFIX/lbann/bin/lbann2" "$@"
